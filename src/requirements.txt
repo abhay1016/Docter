@@ -2,9 +2,7 @@ streamlit
 langchain
 langchain-community
 langchain-groq
-sentence-transformers
+fastembed
 faiss-cpu
 python-dotenv
 pypdf
-requests
-streamlit-lottie
