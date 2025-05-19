@@ -1,9 +1,8 @@
 import streamlit as st
 import os
 import uuid
-import shutil
 import logging
-from langchain.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -13,6 +12,7 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.memory import ConversationBufferWindowMemory
 from dotenv import load_dotenv
+import requests
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +30,8 @@ if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferWindowMemory(k=7, memory_key="chat_history", return_messages=True)
 if "editing_message_index" not in st.session_state:
     st.session_state.editing_message_index = None
+if "pdf_processed" not in st.session_state:
+    st.session_state.pdf_processed = False
 
 # Set up medical-themed CSS
 st.markdown("""
@@ -83,8 +85,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Display title
+# Display title and instructions
 st.markdown("<h1 style='text-align: center; color: #007bff;'>MediChat: Your AI Medical Assistant</h1>", unsafe_allow_html=True)
+st.markdown("Upload a medical document (PDF) to ask questions about its content. MediChat will provide concise, accurate answers based on the document.", unsafe_allow_html=True)
 
 # Load and split PDF data
 def load_pdf_file(data_path):
@@ -109,7 +112,17 @@ def text_split(extracted_data):
         st.error(f"Failed to split text: {str(e)}")
         return []
 
-# Download FastEmbed Embeddings
+# Check if PDF content is medical-related
+def is_medical_content(documents):
+    medical_keywords = ["medical", "health", "disease", "treatment", "symptoms", "diagnosis", "patient", "medicine", "hospital", "therapy"]
+    for doc in documents:
+        content = doc.page_content.lower()
+        if any(keyword in content for keyword in medical_keywords):
+            return True
+    return False
+
+# Cache embeddings to avoid reinitialization
+@st.cache_resource
 def download_fastembed_embeddings():
     try:
         embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
@@ -120,7 +133,7 @@ def download_fastembed_embeddings():
         st.error(f"Failed to initialize embeddings: {str(e)}")
         return None
 
-# Set up Groq LLM
+# Set up Groq LLM with network error handling
 def setup_llm():
     try:
         llm = ChatGroq(
@@ -131,6 +144,10 @@ def setup_llm():
         )
         logger.info("Initialized Groq LLM")
         return llm
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error initializing Groq LLM: {str(e)}")
+        st.error("Failed to connect to Groq API. Please check your internet connection or API key.")
+        return None
     except Exception as e:
         logger.error(f"Error initializing Groq LLM: {str(e)}")
         st.error(f"Failed to initialize LLM: {str(e)}")
@@ -149,12 +166,13 @@ def create_faiss_vector_store(documents, embeddings, store_id):
         st.error(f"Failed to create vector store: {str(e)}")
         return None
 
-# Load FAISS vector store
-def load_faiss_vector_store(store_id, embeddings):
+# Cache vector store to avoid reloading
+@st.cache_resource
+def load_faiss_vector_store(store_id, _embeddings):
     try:
         vector_store_path = f"faiss_store_{store_id}"
         if os.path.exists(vector_store_path):
-            vector_store = FAISS.load_local(vector_store_path, embeddings, allow_dangerous_deserialization=True)
+            vector_store = FAISS.load_local(vector_store_path, _embeddings, allow_dangerous_deserialization=True)
             logger.info(f"Loaded FAISS vector store from {vector_store_path}")
             return vector_store
         else:
@@ -169,15 +187,18 @@ def load_faiss_vector_store(store_id, embeddings):
 # Sidebar for PDF upload
 with st.sidebar:
     st.header("Upload Medical Document")
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
-    if uploaded_file:
+    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key="pdf_uploader")
+    if st.button("Reset and Upload New PDF"):
+        st.session_state.clear()
+        st.rerun()
+    if uploaded_file and not st.session_state.pdf_processed:
         try:
             # Create a unique ID for the new vector store
             new_store_id = str(uuid.uuid4())
-            temp_dir = f"temp_{new_store_id}"
+            temp_dir = f"pdf_storage/{new_store_id}"
             os.makedirs(temp_dir, exist_ok=True)
             
-            # Save uploaded PDF
+            # Save uploaded PDF persistently
             pdf_path = os.path.join(temp_dir, uploaded_file.name)
             with open(pdf_path, "wb") as f:
                 f.write(uploaded_file.getvalue())
@@ -185,47 +206,48 @@ with st.sidebar:
             # Process PDF
             extracted_data = load_pdf_file(temp_dir)
             if not extracted_data:
-                st.error("No documents loaded from PDF.")
-                shutil.rmtree(temp_dir)
+                st.error("No documents loaded from PDF. Please upload a valid PDF.")
+                st.session_state.pdf_processed = False
                 st.rerun()
+            
+            # Check if content is medical-related
+            if not is_medical_content(extracted_data):
+                st.warning("The uploaded PDF does not appear to contain medical content. Please upload a medical document for best results.")
             
             text_chunks = text_split(extracted_data)
             if not text_chunks:
-                st.error("No text chunks created from PDF.")
-                shutil.rmtree(temp_dir)
+                st.error("No text chunks created from PDF. Ensure the PDF contains extractable text.")
+                st.session_state.pdf_processed = False
                 st.rerun()
             
             embeddings = download_fastembed_embeddings()
             if not embeddings:
                 st.error("Failed to initialize embeddings.")
-                shutil.rmtree(temp_dir)
+                st.session_state.pdf_processed = False
                 st.rerun()
             
             vector_store_path = create_faiss_vector_store(text_chunks, embeddings, new_store_id)
             if not vector_store_path:
                 st.error("Failed to create vector store.")
-                shutil.rmtree(temp_dir)
+                st.session_state.pdf_processed = False
                 st.rerun()
             
             # Update session state
             st.session_state.vector_store_id = new_store_id
-            st.session_state.chat_history = []  # Clear chat history for new document
+            st.session_state.chat_history = []
             st.session_state.memory = ConversationBufferWindowMemory(k=7, memory_key="chat_history", return_messages=True)
-            
-            # Clean up temporary directory
-            shutil.rmtree(temp_dir)
+            st.session_state.pdf_processed = True
             
             st.success("PDF processed successfully! Start chatting.")
-            st.rerun()  # Force UI refresh
         except Exception as e:
             logger.error(f"Error processing PDF upload: {str(e)}")
             st.error(f"Error processing PDF: {str(e)}")
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+            st.session_state.pdf_processed = False
 
 # Main chat interface
 st.header("Chat with MediChat")
-if st.session_state.vector_store_id:
+logger.info(f"Rendering chat UI with vector_store_id: {st.session_state.vector_store_id}")
+if st.session_state.vector_store_id and st.session_state.pdf_processed:
     # Set up RAG chain
     embeddings = download_fastembed_embeddings()
     if not embeddings:
@@ -272,34 +294,34 @@ if st.session_state.vector_store_id:
                     edited_message = st.text_input("Edit your message:", value=st.session_state.chat_history[st.session_state.editing_message_index]["content"])
                     submit_edit = st.form_submit_button("Submit Edit")
                     if submit_edit:
-                        # Update chat history
                         st.session_state.chat_history[st.session_state.editing_message_index]["content"] = edited_message
-                        # Reprocess the edited query
                         response = rag_chain.invoke({"input": edited_message, "chat_history": st.session_state.memory.load_memory_variables({})["chat_history"]})
-                        # Update chat history with new response
+                        logger.info(f"Processed edited query: {edited_message}")
                         st.session_state.chat_history.append({"role": "assistant", "content": response["answer"]})
                         st.session_state.memory.save_context({"input": edited_message}, {"output": response["answer"]})
                         st.session_state.editing_message_index = None
                         st.rerun()
             
-            # Chat input
-            user_input = st.text_input("Ask a medical question:", key="user_input")
-            if user_input:
-                try:
-                    # Invoke RAG chain
-                    response = rag_chain.invoke({"input": user_input, "chat_history": st.session_state.memory.load_memory_variables({})["chat_history"]})
-                    # Update chat history and memory
-                    st.session_state.chat_history.append({"role": "user", "content | user_input})
-                    st.session_state.chat_history.append({"role": "assistant", "content": response["answer"]})
-                    st.session_state.memory.save_context({"input": user_input}, {"output": response["answer"]})
-                    st.rerun()
-                except Exception as e:
-                    logger.error(f"Error processing user input: {str(e)}")
-                    st.error(f"Error processing your question: {str(e)}")
+            # Chat input with form to prevent repeated submissions
+            with st.form(key="chat_form", clear_on_submit=True):
+                user_input = st.text_input("Ask a medical question (e.g., 'What are the symptoms of diabetes?'):", key="user_input")
+                submit_button = st.form_submit_button("Submit")
+                if submit_button and user_input:
+                    try:
+                        response = rag_chain.invoke({"input": user_input, "chat_history": st.session_state.memory.load_memory_variables({})["chat_history"]})
+                        logger.info(f"Processed user query: {user_input}")
+                        st.session_state.chat_history.append({"role": "user", "content": user_input})
+                        st.session_state.chat_history.append({"role": "assistant", "content": response["answer"]})
+                        st.session_state.memory.save_context({"input": user_input}, {"output": response["answer"]})
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(f"Error processing user input: {str(e)}")
+                        st.error(f"Error processing your question: {str(e)}")
         except Exception as e:
             logger.error(f"Error setting up RAG chain: {str(e)}")
             st.error(f"Failed to set up chat system: {str(e)}")
     else:
         st.error("Failed to load vector store. Please upload a new PDF.")
+        st.session_state.pdf_processed = False
 else:
     st.info("Please upload a PDF to start chatting.")
