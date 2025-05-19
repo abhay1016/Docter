@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 import uuid
-import pickle
 import shutil
 from langchain.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -13,9 +12,6 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.memory import ConversationBufferWindowMemory
 from dotenv import load_dotenv
-import requests
-from streamlit_lottie import st_lottie
-from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -29,8 +25,6 @@ if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferWindowMemory(k=7, memory_key="chat_history", return_messages=True)
 if "editing_message_index" not in st.session_state:
     st.session_state.editing_message_index = None
-if "show_animation" not in st.session_state:
-    st.session_state.show_animation = True
 
 # Set up medical-themed CSS
 st.markdown("""
@@ -84,19 +78,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Function to load Lottie animation
-def load_lottieurl(url: str):
-    r = requests.get(url)
-    if r.status_code != 200:
-        return None
-    return r.json()
-
-# Display medical-themed animation on startup
-if st.session_state.show_animation:
-    lottie_medical = load_lottieurl("https://assets5.lottiefiles.com/packages/lf20_1pxqjqgy.json")
-    st_lottie(lottie_medical, height=300, key="medical_animation")
-    st.markdown("<h1 style='text-align: center; color: #007bff;'>MediChat: Your AI Medical Assistant</h1>", unsafe_allow_html=True)
-    st.session_state.show_animation = False
+# Display title
+st.markdown("<h1 style='text-align: center; color: #007bff;'>MediChat: Your AI Medical Assistant</h1>", unsafe_allow_html=True)
 
 # Load and split PDF data
 def load_pdf_file(data_path):
