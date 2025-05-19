@@ -5,6 +5,6 @@ langchain-groq
 sentence-transformers
 faiss-cpu
 python-dotenv
-pypdf2
+pypdf
 requests
 streamlit-lottie
